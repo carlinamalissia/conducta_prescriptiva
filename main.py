@@ -1,17 +1,21 @@
 """
-API de Conducta Prescriptiva
-============================
+API de Conducta Prescriptiva — Sistema de Jobs Asíncronos
+=========================================================
 Endpoints:
-  POST /analizar    — devuelve JSON con los 3 escenarios
-  POST /exportar    — devuelve el Excel descargable
-  GET  /health      — health check para Railway
-
-Seguridad: API key via header X-API-Key (configurar en variable de entorno API_KEY)
+  POST /analizar      → inicia job, devuelve job_id inmediatamente
+  POST /exportar      → inicia job de exportación, devuelve job_id
+  GET  /resultado/{job_id} → consulta estado/resultado del job
+  GET  /health        → health check
 """
 
 import os
+import uuid
+import asyncio
 import logging
-from fastapi import FastAPI, HTTPException, Depends, Header
+from datetime import datetime
+from enum import Enum
+from typing import Any
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
 import io
@@ -27,109 +31,211 @@ app = FastAPI(
     title="API Conducta Prescriptiva",
     description="Análisis automático de prescripciones vs consultas — GEA Sanatorios",
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
 )
 
 API_KEY = os.getenv("API_KEY", "")
 
+# ── Store de jobs en memoria ──────────────────────────────────────────────────
+
+class EstadoJob(str, Enum):
+    pendiente  = "pendiente"
+    procesando = "procesando"
+    completado = "completado"
+    error      = "error"
+
+jobs: dict[str, dict[str, Any]] = {}
+
+def nuevo_job(tipo: str) -> str:
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "id":         job_id,
+        "tipo":       tipo,
+        "estado":     EstadoJob.pendiente,
+        "creado":     datetime.utcnow().isoformat(),
+        "actualizado": datetime.utcnow().isoformat(),
+        "resultado":  None,
+        "excel":      None,
+        "error":      None,
+    }
+    return job_id
+
+def actualizar_job(job_id: str, **kwargs):
+    if job_id in jobs:
+        jobs[job_id].update(kwargs)
+        jobs[job_id]["actualizado"] = datetime.utcnow().isoformat()
+
+# ── Seguridad ─────────────────────────────────────────────────────────────────
 
 def verificar_api_key(x_api_key: str = Header(default="")):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="API key inválida o ausente")
 
+# ── Schema de request ─────────────────────────────────────────────────────────
 
 class SolicitudAnalisis(BaseModel):
-    usuario: str = Field(..., description="Usuario del HIS (hospital.sdlc.com.ar)")
-    password: str = Field(..., description="Contraseña del HIS")
-    centro: str = Field(default="", description="Centro de atención. Vacío = todos los centros")
-    fecha_desde: str = Field(..., description="Fecha inicio en formato DD/MM/AAAA. Ej: 01/03/2026")
-    fecha_hasta: str = Field(..., description="Fecha fin en formato DD/MM/AAAA. Ej: 31/03/2026")
+    usuario:     str = Field(..., description="Usuario del HIS")
+    password:    str = Field(..., description="Contraseña del HIS")
+    centro:      str = Field(default="", description="Centro de atención. Vacío = todos")
+    fecha_desde: str = Field(..., description="DD/MM/AAAA — ej: 01/03/2026")
+    fecha_hasta: str = Field(..., description="DD/MM/AAAA — ej: 31/03/2026")
 
     @validator("fecha_desde", "fecha_hasta")
     def validar_fecha(cls, v):
         import re
         if not re.match(r"^\d{2}/\d{2}/\d{4}$", v):
-            raise ValueError("La fecha debe tener el formato DD/MM/AAAA. Ej: 01/03/2026")
+            raise ValueError("Formato de fecha inválido. Usar DD/MM/AAAA")
         return v
 
+# ── Tarea de fondo ────────────────────────────────────────────────────────────
 
-async def _ejecutar_pipeline(solicitud: SolicitudAnalisis) -> dict:
-    params = ParamsDescarga(
-        usuario=solicitud.usuario,
-        password=solicitud.password,
-        centro=solicitud.centro,
-        fecha_desde=solicitud.fecha_desde,
-        fecha_hasta=solicitud.fecha_hasta,
-    )
-
-    logger.info(f"Iniciando análisis | centro={solicitud.centro or 'TODOS'} "
-                f"| {solicitud.fecha_desde} → {solicitud.fecha_hasta}")
+async def ejecutar_analisis(job_id: str, solicitud: SolicitudAnalisis, modo: str):
+    actualizar_job(job_id, estado=EstadoJob.procesando)
+    logger.info(f"[{job_id}] Iniciando análisis | centro={solicitud.centro or 'TODOS'} | {solicitud.fecha_desde} → {solicitud.fecha_hasta}")
 
     try:
+        params = ParamsDescarga(
+            usuario=solicitud.usuario,
+            password=solicitud.password,
+            centro=solicitud.centro,
+            fecha_desde=solicitud.fecha_desde,
+            fecha_hasta=solicitud.fecha_hasta,
+        )
+
         raw_consultas, raw_prescripciones = await descargar_ambos_excels(params)
-    except ErrorLogin as e:
-        raise HTTPException(status_code=401, detail=str(e))
-    except ErrorDescarga as e:
-        raise HTTPException(status_code=502, detail=f"Error al descargar datos del HIS: {e}")
-    except Exception as e:
-        logger.error(f"Error inesperado en scraper: {e}")
-        raise HTTPException(status_code=500, detail=f"Error inesperado: {e}")
+        logger.info(f"[{job_id}] Archivos descargados — procesando...")
 
-    try:
         resultado = analizar(raw_consultas, raw_prescripciones)
+
+        if modo == "exportar":
+            excel_bytes = generar_excel(resultado)
+            resultado.pop("_dataframes", None)
+            actualizar_job(job_id,
+                estado=EstadoJob.completado,
+                resultado=resultado,
+                excel=excel_bytes,
+            )
+        else:
+            resultado.pop("_dataframes", None)
+            actualizar_job(job_id,
+                estado=EstadoJob.completado,
+                resultado=resultado,
+            )
+
+        logger.info(f"[{job_id}] Completado")
+
+    except ErrorLogin as e:
+        logger.error(f"[{job_id}] Error de login: {e}")
+        actualizar_job(job_id, estado=EstadoJob.error, error=f"Login fallido: {e}")
+    except ErrorDescarga as e:
+        logger.error(f"[{job_id}] Error de descarga: {e}")
+        actualizar_job(job_id, estado=EstadoJob.error, error=f"Error al descargar datos: {e}")
     except Exception as e:
-        logger.error(f"Error en motor de análisis: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al procesar los datos: {e}")
+        logger.error(f"[{job_id}] Error inesperado: {e}")
+        actualizar_job(job_id, estado=EstadoJob.error, error=f"Error inesperado: {e}")
 
-    return resultado
-
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "1.0.0", "jobs_activos": len(jobs)}
 
 
 @app.post(
     "/analizar",
-    summary="Analizar conducta prescriptiva",
-    description=(
-        "Conecta al HIS con las credenciales provistas, descarga los datos del período "
-        "indicado y retorna el análisis completo en JSON con los 3 escenarios."
-    ),
+    summary="Iniciar análisis de conducta prescriptiva",
+    description="Inicia el análisis en segundo plano y devuelve un job_id. Consultá el resultado con GET /resultado/{job_id}",
     dependencies=[Depends(verificar_api_key)],
 )
-async def analizar_endpoint(solicitud: SolicitudAnalisis):
-    resultado = await _ejecutar_pipeline(solicitud)
-    resultado.pop("_dataframes", None)
-    return JSONResponse(content=resultado)
+async def analizar_endpoint(
+    solicitud: SolicitudAnalisis,
+    background_tasks: BackgroundTasks,
+):
+    job_id = nuevo_job("analizar")
+    background_tasks.add_task(ejecutar_analisis, job_id, solicitud, "analizar")
+    return {
+        "job_id": job_id,
+        "estado": EstadoJob.pendiente,
+        "mensaje": "Análisis iniciado. Consultá el resultado en GET /resultado/{job_id}",
+        "resultado_url": f"/resultado/{job_id}",
+    }
 
 
 @app.post(
     "/exportar",
-    summary="Exportar análisis como Excel",
-    description=(
-        "Igual que /analizar pero retorna un archivo Excel descargable con "
-        "todas las hojas: Resumen, 3 escenarios, Sin prescripción y Desvíos."
-    ),
+    summary="Iniciar exportación como Excel",
+    description="Igual que /analizar pero el resultado incluye un Excel descargable en GET /resultado/{job_id}/excel",
     dependencies=[Depends(verificar_api_key)],
 )
-async def exportar_endpoint(solicitud: SolicitudAnalisis):
-    resultado = await _ejecutar_pipeline(solicitud)
+async def exportar_endpoint(
+    solicitud: SolicitudAnalisis,
+    background_tasks: BackgroundTasks,
+):
+    job_id = nuevo_job("exportar")
+    background_tasks.add_task(ejecutar_analisis, job_id, solicitud, "exportar")
+    return {
+        "job_id": job_id,
+        "estado": EstadoJob.pendiente,
+        "mensaje": "Exportación iniciada. Cuando el estado sea 'completado', descargá el Excel en GET /resultado/{job_id}/excel",
+        "resultado_url": f"/resultado/{job_id}",
+        "excel_url":     f"/resultado/{job_id}/excel",
+    }
 
-    try:
-        excel_bytes = generar_excel(resultado)
-    except Exception as e:
-        logger.error(f"Error generando Excel: {e}")
-        raise HTTPException(status_code=500, detail=f"Error al generar Excel: {e}")
 
-    centro_limpio = (solicitud.centro or "todos").replace(" ", "_").replace("/", "-")[:20]
-    desde = solicitud.fecha_desde.replace("/", "")
-    hasta = solicitud.fecha_hasta.replace("/", "")
-    nombre = f"Prescriptiva_{centro_limpio}_{desde}_{hasta}.xlsx"
+@app.get(
+    "/resultado/{job_id}",
+    summary="Consultar estado y resultado de un job",
+    dependencies=[Depends(verificar_api_key)],
+)
+def resultado_endpoint(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' no encontrado")
+
+    respuesta = {
+        "id":         job["id"],
+        "tipo":       job["tipo"],
+        "estado":     job["estado"],
+        "creado":     job["creado"],
+        "actualizado": job["actualizado"],
+    }
+
+    if job["estado"] == EstadoJob.error:
+        respuesta["error"] = job["error"]
+
+    if job["estado"] == EstadoJob.completado:
+        respuesta["resultado"] = job["resultado"]
+        if job["excel"]:
+            respuesta["excel_disponible"] = True
+            respuesta["excel_url"] = f"/resultado/{job_id}/excel"
+
+    return JSONResponse(content=respuesta)
+
+
+@app.get(
+    "/resultado/{job_id}/excel",
+    summary="Descargar Excel de un job completado",
+    dependencies=[Depends(verificar_api_key)],
+)
+def descargar_excel_endpoint(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' no encontrado")
+
+    if job["estado"] != EstadoJob.completado:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El job está en estado '{job['estado']}' — esperá a que esté 'completado'"
+        )
+
+    if not job["excel"]:
+        raise HTTPException(status_code=400, detail="Este job no generó un Excel (usá /exportar en vez de /analizar)")
+
+    centro = (job["resultado"] or {}).get("metadata", {}).get("centros", [""])[0]
+    centro_limpio = centro[:20].replace(" ", "_").replace("/", "-") if centro else "todos"
+    nombre = f"Prescriptiva_{centro_limpio}_{job['creado'][:10]}.xlsx"
 
     return StreamingResponse(
-        io.BytesIO(excel_bytes),
+        io.BytesIO(job["excel"]),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{nombre}"'},
     )
@@ -138,22 +244,35 @@ async def exportar_endpoint(solicitud: SolicitudAnalisis):
 @app.post(
     "/profesional",
     summary="Detalle de un profesional específico",
-    description="Retorna los 3 escenarios filtrados para un solo profesional.",
     dependencies=[Depends(verificar_api_key)],
 )
-async def profesional_endpoint(solicitud: SolicitudAnalisis, nombre_profesional: str):
-    resultado = await _ejecutar_pipeline(solicitud)
-    nombre_upper = nombre_profesional.upper().strip()
+async def profesional_endpoint(
+    solicitud: SolicitudAnalisis,
+    background_tasks: BackgroundTasks,
+    nombre_profesional: str = "",
+):
+    job_id = nuevo_job("profesional")
 
-    detalle = {}
-    for esc_key in ["escenario_1", "escenario_2", "escenario_3"]:
-        esc = resultado.get(esc_key, {})
-        detalle[esc_key] = {
-            "nombre": esc.get("nombre"),
-            "por_profesional": [
-                r for r in esc.get("por_profesional", [])
-                if nombre_upper in str(r.get("personal", "")).upper()
-            ],
-        }
+    async def tarea_profesional(job_id, solicitud, nombre):
+        await ejecutar_analisis(job_id, solicitud, "analizar")
+        if jobs[job_id]["estado"] == EstadoJob.completado and nombre:
+            nombre_upper = nombre.upper().strip()
+            resultado = jobs[job_id]["resultado"]
+            filtrado = {}
+            for esc_key in ["escenario_1", "escenario_2", "escenario_3"]:
+                esc = resultado.get(esc_key, {})
+                filtrado[esc_key] = {
+                    "nombre": esc.get("nombre"),
+                    "por_profesional": [
+                        r for r in esc.get("por_profesional", [])
+                        if nombre_upper in str(r.get("personal", "")).upper()
+                    ],
+                }
+            jobs[job_id]["resultado"] = filtrado
 
-    return JSONResponse(content=detalle)
+    background_tasks.add_task(tarea_profesional, job_id, solicitud, nombre_profesional)
+    return {
+        "job_id": job_id,
+        "estado": EstadoJob.pendiente,
+        "resultado_url": f"/resultado/{job_id}",
+    }
