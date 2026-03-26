@@ -276,3 +276,53 @@ async def profesional_endpoint(
         "estado": EstadoJob.pendiente,
         "resultado_url": f"/resultado/{job_id}",
     }
+
+
+# ── Proxy Claude ──────────────────────────────────────────────────────────────
+
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request
+import httpx
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+class ProxyRequest(BaseModel):
+    model: str = "claude-sonnet-4-20250514"
+    max_tokens: int = 16000
+    messages: list
+
+@app.post(
+    "/claude",
+    summary="Proxy hacia la API de Anthropic",
+    description="Reenvía el request a api.anthropic.com usando la API key configurada en Railway.",
+)
+async def proxy_claude(body: ProxyRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no configurada en Railway")
+
+    async with httpx.AsyncClient(timeout=300) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": body.model,
+                "max_tokens": body.max_tokens,
+                "messages": body.messages,
+            },
+        )
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=resp.text)
+
+    return resp.json()
