@@ -287,31 +287,30 @@ async def profesional_endpoint(
     }
 
 
-# ── Proxy Claude ──────────────────────────────────────────────────────────────
+# ── Proxy OpenAI ──────────────────────────────────────────────────────────────
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 class ProxyRequest(BaseModel):
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "gpt-4o"
     max_tokens: int = 16000
     messages: list
 
 @app.post(
     "/claude",
-    summary="Proxy hacia la API de Anthropic",
-    description="Reenvía el request a api.anthropic.com usando la API key configurada en Railway.",
+    summary="Proxy hacia la API de OpenAI",
+    description="Reenvía el request a api.openai.com usando la API key configurada en Railway.",
 )
 async def proxy_claude(body: ProxyRequest):
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no configurada en Railway")
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY no configurada en Railway")
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
+            "https://api.openai.com/v1/chat/completions",
             headers={
                 "Content-Type": "application/json",
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
             },
             json={
                 "model": body.model,
@@ -323,7 +322,12 @@ async def proxy_claude(body: ProxyRequest):
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
-    return resp.json()
+    # Convertir respuesta OpenAI al formato que espera el frontend
+    data = resp.json()
+    content_text = data["choices"][0]["message"]["content"]
+    return {
+        "content": [{"type": "text", "text": content_text}]
+    }
 
 
 # ── Servir la app web ─────────────────────────────────────────────────────────
