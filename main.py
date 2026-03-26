@@ -313,7 +313,7 @@ async def proxy_claude(body: ProxyRequest):
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
             },
             json={
-                "model": body.model,
+                "model": "gpt-4o",
                 "max_tokens": body.max_tokens,
                 "messages": body.messages,
             },
