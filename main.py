@@ -15,10 +15,12 @@ import logging
 from datetime import datetime
 from enum import Enum
 from typing import Any
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 import io
+import httpx
 
 from scraper import descargar_ambos_excels, ParamsDescarga, ErrorLogin, ErrorDescarga
 from motor import analizar
@@ -31,6 +33,13 @@ app = FastAPI(
     title="API Conducta Prescriptiva",
     description="Análisis automático de prescripciones vs consultas — GEA Sanatorios",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 API_KEY = os.getenv("API_KEY", "")
@@ -279,17 +288,6 @@ async def profesional_endpoint(
 
 
 # ── Proxy Claude ──────────────────────────────────────────────────────────────
-
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Request
-import httpx
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=["*"],
-)
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
