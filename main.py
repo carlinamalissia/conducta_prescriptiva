@@ -287,33 +287,34 @@ async def profesional_endpoint(
     }
 
 
-# ── Proxy OpenAI ──────────────────────────────────────────────────────────────
+# ── Proxy Anthropic ───────────────────────────────────────────────────────────
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 class ProxyRequest(BaseModel):
-    model: str = "gpt-4o"
+    model: str = "claude-sonnet-4-20250514"
     max_tokens: int = 16000
     messages: list
 
 @app.post(
     "/claude",
-    summary="Proxy hacia la API de OpenAI",
-    description="Reenvía el request a api.openai.com usando la API key configurada en Railway.",
+    summary="Proxy hacia la API de Anthropic",
+    description="Reenvía el request a api.anthropic.com usando la API key configurada en Railway.",
 )
 async def proxy_claude(body: ProxyRequest):
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY no configurada en Railway")
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no configurada en Railway")
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
-            "https://api.openai.com/v1/chat/completions",
+            "https://api.anthropic.com/v1/messages",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
             },
             json={
-                "model": "gpt-4o",
+                "model": "claude-sonnet-4-20250514",
                 "max_tokens": body.max_tokens,
                 "messages": body.messages,
             },
@@ -322,12 +323,7 @@ async def proxy_claude(body: ProxyRequest):
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=resp.text)
 
-    # Convertir respuesta OpenAI al formato que espera el frontend
-    data = resp.json()
-    content_text = data["choices"][0]["message"]["content"]
-    return {
-        "content": [{"type": "text", "text": content_text}]
-    }
+    return resp.json()
 
 
 # ── Servir la app web ─────────────────────────────────────────────────────────
