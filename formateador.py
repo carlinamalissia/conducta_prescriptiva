@@ -70,24 +70,35 @@ def _freeze(ws, row=5, col=2):
     ws.sheet_view.showGridLines = False
 
 def d(v):
-    return v if v is not None else '—'
+    if v is None or v == '—': return '—'
+    try:
+        fv = float(v)
+        return int(fv) if fv == int(fv) else fv
+    except: return '—'
+
+def pct(v):
+    try: return float(v) / 100
+    except: return None
 
 def semR(v):
-    if not isinstance(v, (int, float)): return '—'
+    try: v = float(v)
+    except: return '—'
     s = f'{v:.2f}'
     if v >= 4:   return f'🔴 {s}'
     if v >= 2.5: return f'🟡 {s}'
     return f'🟢 {s}'
 
 def semP(v):
-    if not isinstance(v, (int, float)): return '—'
+    try: v = float(v)
+    except: return '—'
     s = f'{v*100:.1f}%'
     if v >= 0.60: return f'🔴 {s}'
     if v >= 0.35: return f'🟡 {s}'
     return f'🟢 {s}'
 
 def semPS(v):
-    if not isinstance(v, (int, float)): return '—'
+    try: v = float(v)
+    except: return '—'
     s = f'{v*100:.1f}%'
     if v >= 0.75: return f'🔴 {s}'
     if v >= 0.25: return f'🟡 {s}'
@@ -181,9 +192,9 @@ def generar_excel_formateado(data: dict, periodo: str, centro: str) -> bytes:
     for s in svcs:
         ws.append([
             s.get('servicio',''),
-            d(s.get('esc1_consultas')), d(s.get('esc1_con_presc')), d(s.get('esc1_sin_presc')), semP((s.get('esc1_pct') or 0)/100), d(s.get('esc1_total_presc')), semR(s.get('esc1_ratio')),
-            d(s.get('esc2_consultas')), d(s.get('esc2_con_presc')), d(s.get('esc2_sin_presc')), semP((s.get('esc2_pct') or 0)/100), d(s.get('esc2_total_presc')), semR(s.get('esc2_ratio')),
-            d(s.get('esc3_consultas')), d(s.get('esc3_con_presc')), d(s.get('esc3_sin_presc')), semP((s.get('esc3_pct') or 0)/100), d(s.get('esc3_total_presc')), semR(s.get('esc3_ratio')),
+            d(s.get('esc1_consultas')), d(s.get('esc1_con_presc')), d(s.get('esc1_sin_presc')), semP(pct(s.get('esc1_pct'))), d(s.get('esc1_total_presc')), semR(s.get('esc1_ratio')),
+            d(s.get('esc2_consultas')), d(s.get('esc2_con_presc')), d(s.get('esc2_sin_presc')), semP(pct(s.get('esc2_pct'))), d(s.get('esc2_total_presc')), semR(s.get('esc2_ratio')),
+            d(s.get('esc3_consultas')), d(s.get('esc3_con_presc')), d(s.get('esc3_sin_presc')), semP(pct(s.get('esc3_pct'))), d(s.get('esc3_total_presc')), semR(s.get('esc3_ratio')),
         ])
 
     CM = 19
@@ -221,9 +232,9 @@ def generar_excel_formateado(data: dict, periodo: str, centro: str) -> bytes:
     for p in profs:
         ws.append([
             p.get('profesional',''), p.get('servicio',''),
-            d(p.get('esc1_consultas')), d(p.get('esc1_con_presc')), d(p.get('esc1_sin_presc')), semP((p.get('esc1_pct') or 0)/100), d(p.get('esc1_total_presc')), semR(p.get('esc1_ratio')),
-            d(p.get('esc2_consultas')), d(p.get('esc2_con_presc')), d(p.get('esc2_sin_presc')), semP((p.get('esc2_pct') or 0)/100), d(p.get('esc2_total_presc')), semR(p.get('esc2_ratio')),
-            d(p.get('esc3_consultas')), d(p.get('esc3_con_presc')), d(p.get('esc3_sin_presc')), semP((p.get('esc3_pct') or 0)/100), d(p.get('esc3_total_presc')), semR(p.get('esc3_ratio')),
+            d(p.get('esc1_consultas')), d(p.get('esc1_con_presc')), d(p.get('esc1_sin_presc')), semP(pct(p.get('esc1_pct'))), d(p.get('esc1_total_presc')), semR(p.get('esc1_ratio')),
+            d(p.get('esc2_consultas')), d(p.get('esc2_con_presc')), d(p.get('esc2_sin_presc')), semP(pct(p.get('esc2_pct'))), d(p.get('esc2_total_presc')), semR(p.get('esc2_ratio')),
+            d(p.get('esc3_consultas')), d(p.get('esc3_con_presc')), d(p.get('esc3_sin_presc')), semP(pct(p.get('esc3_pct'))), d(p.get('esc3_total_presc')), semR(p.get('esc3_ratio')),
         ])
 
     CM = 20
