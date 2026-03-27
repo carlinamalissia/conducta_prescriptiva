@@ -305,6 +305,22 @@ async def proxy_claude(body: ProxyRequest):
     if not ANTHROPIC_API_KEY:
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY no configurada en Railway")
 
+    # Normalizar messages: Anthropic acepta content como string o lista
+    messages = []
+    for msg in body.messages:
+        if isinstance(msg, dict):
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            # Si content es lista, convertir a string
+            if isinstance(content, list):
+                content = " ".join(
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in content
+                )
+            messages.append({"role": role, "content": str(content)})
+        else:
+            messages.append({"role": "user", "content": str(msg)})
+
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
@@ -316,7 +332,7 @@ async def proxy_claude(body: ProxyRequest):
             json={
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": body.max_tokens,
-                "messages": body.messages,
+                "messages": messages,
             },
         )
 
